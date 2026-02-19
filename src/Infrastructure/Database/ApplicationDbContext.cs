@@ -1,7 +1,7 @@
 using Microsoft.EntityFrameworkCore;
+
 using BellNotification.Application.Interfaces;
-using BellNotificationEntity = BellNotification.Domain.Entities.BellNotification;
-using NotificationStatusEntity = BellNotification.Domain.Entities.NotificationStatus;
+using BellNotification.Domain.Entities;
 
 namespace BellNotification.Infrastructure.Database;
 
@@ -10,16 +10,16 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     public ApplicationDbContext(DbContextOptions<ApplicationDbContext> options)
         : base(options) { }
 
-    public required DbSet<BellNotificationEntity> BellNotifications { get; set; }
-    public required DbSet<NotificationStatusEntity> NotificationStatuses { get; set; }
+    public required DbSet<Domain.Entities.BellNotification> BellNotifications { get; set; }
+    public required DbSet<NotificationStatus> NotificationStatuses { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
 
         // Configure BellNotification
-        modelBuilder.Entity<BellNotificationEntity>(entity =>
-        {
+        modelBuilder.Entity<Domain.Entities.BellNotification>(entity =>
+        {            
             entity.HasKey(x => x.Id);
             entity.Property(x => x.UserId).IsRequired().HasMaxLength(200);
             entity.Property(x => x.Type).IsRequired().HasMaxLength(100);
@@ -40,12 +40,12 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
             entity.HasIndex(x => new { x.TenantId, x.UserId, x.DedupeKey })
                 .HasDatabaseName("IX_BellNotification_DedupeKey")
                 .IsUnique()
-                .HasFilter("[DedupeKey] IS NOT NULL");
+                .HasFilter("\"DedupeKey\" IS NOT NULL");
         });
 
         // Configure NotificationStatus
-        modelBuilder.Entity<NotificationStatusEntity>(entity =>
-        {
+        modelBuilder.Entity<NotificationStatus>(entity =>
+        {            
             entity.HasKey(x => new { x.NotificationId, x.UserId });
             
             entity.Property(x => x.UserId).IsRequired().HasMaxLength(200);

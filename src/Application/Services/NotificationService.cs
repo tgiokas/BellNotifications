@@ -1,96 +1,88 @@
-using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Logging;
-using BellNotification.Application.Dtos;
-using BellNotification.Application.Interfaces;
-using BellNotificationEntity = BellNotification.Domain.Entities.BellNotification;
-using NotificationStatusEntity = BellNotification.Domain.Entities.NotificationStatus;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
+
+using BellNotification.Application.Dtos;
+using BellNotification.Application.Interfaces;
+using BellNotification.Domain.Interfaces;
 
 namespace BellNotification.Application.Services;
 
 public class NotificationService : INotificationService
 {
-    private readonly IApplicationDbContext _context;
-    private readonly ILogger<NotificationService> _logger;
+    private readonly IBellNotificationRepository _notificationRepository;
+    private readonly INotificationStatusRepository _statusRepository;    
     private readonly ISseConnectionManager _sseConnectionManager;
+    private readonly IWebPushService? _webPushService;
+    private readonly ILogger<NotificationService> _logger;
 
     public NotificationService(
-        IApplicationDbContext context,
+        IBellNotificationRepository notificationRepository,
+        INotificationStatusRepository statusRepository,        
+        ISseConnectionManager sseConnectionManager,
         ILogger<NotificationService> logger,
-        ISseConnectionManager sseConnectionManager)
+        IWebPushService? webPushService = null)
     {
-        _context = context;
-        _logger = logger;
+        _notificationRepository = notificationRepository;
+        _statusRepository = statusRepository;       
         _sseConnectionManager = sseConnectionManager;
+        _logger = logger;
+        _webPushService = webPushService;
     }
 
-    public async Task<UnreadCountResponse> GetUnreadCountAsync(string? tenantId, string userId, CancellationToken cancellationToken = default)
+    public async Task<UnreadCountResponse> GetUnreadCountAsync(string? tenantId, string userId,
+        CancellationToken cancellationToken = default)
     {
-        var count = await _context.NotificationStatuses
-            .Where(s => s.TenantId == tenantId && s.UserId == userId && s.ReadAtUtc == null && s.DismissedAtUtc == null)
-            .CountAsync(cancellationToken);
-
+        var count = await _statusRepository.GetUnreadCountAsync(tenantId, userId, cancellationToken);
         return new UnreadCountResponse { UnreadCount = count };
     }
 
-    public async Task<NotificationListResponse> GetNotificationsAsync(string? tenantId, string userId, string? cursor, int limit, CancellationToken cancellationToken = default)
+    public async Task<NotificationListResponse> GetNotificationsAsync(string? tenantId, string userId, string? cursor, int limit, 
+        CancellationToken cancellationToken = default)
     {
-        limit = Math.Clamp(limit, 1, 100);
-
-        var baseQuery = _context.BellNotifications
-            .Where(n => n.TenantId == tenantId && n.UserId == userId)
-            .Join(
-                _context.NotificationStatuses,
-                n => new { n.Id, n.TenantId, n.UserId },
-                s => new { Id = s.NotificationId, s.TenantId, s.UserId },
-                (n, s) => new { Notification = n, Status = s }
-            );
-
-        // Apply cursor-based pagination before ordering
+        // Decode cursor
+        DateTime? cursorCreatedAt = null;
+        Guid? cursorId = null;
         if (!string.IsNullOrEmpty(cursor))
         {
             var cursorData = DecodeCursor(cursor);
             if (cursorData.HasValue)
             {
-                var (cursorCreatedAt, cursorId) = cursorData.Value;
-                baseQuery = baseQuery.Where(x => 
-                    x.Notification.CreatedAtUtc < cursorCreatedAt ||
-                    (x.Notification.CreatedAtUtc == cursorCreatedAt && x.Notification.Id.CompareTo(cursorId) < 0));
+                cursorCreatedAt = cursorData.Value.CreatedAtUtc;
+                cursorId = cursorData.Value.Id;
             }
         }
 
-        var query = baseQuery
-            .OrderByDescending(x => x.Notification.CreatedAtUtc)
-            .ThenByDescending(x => x.Notification.Id);
+        // Get Notifications with status from repository
+        var notificationsWithStatus = await _notificationRepository
+            .GetNotificationsWithStatusAsync(
+                tenantId, userId, cursorCreatedAt, cursorId, limit + 1, cancellationToken);
 
-        var items = await query
-            .Take(limit + 1) // Take one extra to check if there's a next page
-            .Select(x => new NotificationListItemDto
+        // Map domain model to DTO 
+        var items = notificationsWithStatus
+            .Select(nws => new NotificationListItemDto
             {
-                Id = x.Notification.Id,
-                Type = x.Notification.Type,
-                Title = x.Notification.Title,
-                Body = x.Notification.Body,
-                Link = x.Notification.Link,
-                Severity = x.Notification.Severity,
-                SourceService = x.Notification.SourceService,
-                CreatedAtUtc = x.Notification.CreatedAtUtc,
-                IsRead = x.Status.ReadAtUtc != null,
-                IsDismissed = x.Status.DismissedAtUtc != null
+                Id = nws.Id,
+                Type = nws.Type,
+                Title = nws.Title,
+                Body = nws.Body,
+                Link = nws.Link,
+                Severity = nws.Severity,
+                SourceService = nws.SourceService,
+                CreatedAtUtc = nws.CreatedAtUtc,
+                IsRead = nws.IsRead,
+                IsDismissed = nws.IsDismissed
             })
-            .ToListAsync(cancellationToken);
+            .ToList();
 
+        // Pagination logic
         var hasNextPage = items.Count > limit;
         if (hasNextPage)
         {
             items.RemoveAt(items.Count - 1);
         }
 
-        var response = new NotificationListResponse
-        {
-            Items = items
-        };
+        var response = new NotificationListResponse { Items = items };
 
         if (hasNextPage && items.Count > 0)
         {
@@ -101,14 +93,10 @@ public class NotificationService : INotificationService
         return response;
     }
 
-    public async Task MarkAsReadAsync(string? tenantId, string userId, Guid notificationId, CancellationToken cancellationToken = default)
+    public async Task MarkAsReadAsync(string? tenantId, string userId, Guid notificationId, 
+        CancellationToken cancellationToken = default)
     {
-        var status = await _context.NotificationStatuses
-            .FirstOrDefaultAsync(s => 
-                s.NotificationId == notificationId && 
-                s.TenantId == tenantId && 
-                s.UserId == userId, 
-                cancellationToken);
+        var status = await _statusRepository.GetByNotificationIdAsync(notificationId, tenantId, userId, cancellationToken);
 
         if (status == null)
         {
@@ -116,9 +104,8 @@ public class NotificationService : INotificationService
         }
 
         if (status.ReadAtUtc == null)
-        {
-            status.ReadAtUtc = DateTime.UtcNow;
-            await _context.SaveChangesAsync(cancellationToken);
+        {            
+            await _statusRepository.MarkAsReadAsync(notificationId, tenantId, userId, cancellationToken);
 
             // Broadcast updated unread count
             var unreadCount = await GetUnreadCountAsync(tenantId, userId, cancellationToken);
@@ -126,31 +113,26 @@ public class NotificationService : INotificationService
         }
     }
 
-    public async Task MarkAllAsReadAsync(string? tenantId, string userId, CancellationToken cancellationToken = default)
+    public async Task MarkAllAsReadAsync(string? tenantId, string userId, 
+        CancellationToken cancellationToken = default)
     {
         var now = DateTime.UtcNow;
-        var updated = await _context.NotificationStatuses
-            .Where(s => s.TenantId == tenantId && s.UserId == userId && s.ReadAtUtc == null)
-            .ExecuteUpdateAsync(setters => setters.SetProperty(s => s.ReadAtUtc, now), cancellationToken);
+        
+        // bulk update
+        var updated = await _statusRepository.MarkAllAsReadAsync(tenantId, userId, now, cancellationToken);
 
         if (updated > 0)
         {
-            await _context.SaveChangesAsync(cancellationToken);
-
             // Broadcast updated unread count
             var unreadCount = await GetUnreadCountAsync(tenantId, userId, cancellationToken);
             await _sseConnectionManager.BroadcastUnreadCountAsync(tenantId, userId, unreadCount.UnreadCount, cancellationToken);
         }
     }
 
-    public async Task DismissAsync(string? tenantId, string userId, Guid notificationId, CancellationToken cancellationToken = default)
-    {
-        var status = await _context.NotificationStatuses
-            .FirstOrDefaultAsync(s => 
-                s.NotificationId == notificationId && 
-                s.TenantId == tenantId && 
-                s.UserId == userId, 
-                cancellationToken);
+    public async Task DismissAsync(string? tenantId, string userId, Guid notificationId, 
+        CancellationToken cancellationToken = default)
+    {       
+        var status = await _statusRepository.GetByNotificationIdAsync(notificationId, tenantId, userId, cancellationToken);
 
         if (status == null)
         {
@@ -158,9 +140,8 @@ public class NotificationService : INotificationService
         }
 
         if (status.DismissedAtUtc == null)
-        {
-            status.DismissedAtUtc = DateTime.UtcNow;
-            await _context.SaveChangesAsync(cancellationToken);
+        {            
+            await _statusRepository.MarkAsDismissedAsync(notificationId, tenantId, userId, cancellationToken);
 
             // Broadcast updated unread count
             var unreadCount = await GetUnreadCountAsync(tenantId, userId, cancellationToken);
@@ -168,17 +149,14 @@ public class NotificationService : INotificationService
         }
     }
 
-    public async Task<Guid> CreateNotificationAsync(CreateNotificationRequest request, CancellationToken cancellationToken = default)
+    public async Task<Guid> CreateNotificationAsync(CreateNotificationRequest request, 
+        CancellationToken cancellationToken = default)
     {
         // Check for deduplication
         if (!string.IsNullOrEmpty(request.DedupeKey))
-        {
-            var existing = await _context.BellNotifications
-                .FirstOrDefaultAsync(n => 
-                    n.TenantId == request.TenantId && 
-                    n.UserId == request.UserId && 
-                    n.DedupeKey == request.DedupeKey, 
-                    cancellationToken);
+        {            
+            var existing = await _notificationRepository.GetByDedupeKeyAsync(
+                request.TenantId, request.UserId, request.DedupeKey, cancellationToken);
 
             if (existing != null)
             {
@@ -187,7 +165,8 @@ public class NotificationService : INotificationService
             }
         }
 
-        var notification = new BellNotificationEntity
+        // Create notification entity
+        var notification = new Domain.Entities.BellNotification
         {
             TenantId = request.TenantId,
             UserId = request.UserId,
@@ -200,23 +179,19 @@ public class NotificationService : INotificationService
             SourceService = request.SourceService,
             DedupeKey = request.DedupeKey,
             CreatedAtUtc = DateTime.UtcNow
-        };
-
-        _context.BellNotifications.Add(notification);
-        await _context.SaveChangesAsync(cancellationToken);
+        };        
+        await _notificationRepository.AddAsync(notification, cancellationToken);
 
         // Create status entry
-        var status = new NotificationStatusEntity
+        var status = new Domain.Entities.NotificationStatus
         {
             NotificationId = notification.Id,
             TenantId = request.TenantId,
             UserId = request.UserId,
             ReadAtUtc = null,
             DismissedAtUtc = null
-        };
-
-        _context.NotificationStatuses.Add(status);
-        await _context.SaveChangesAsync(cancellationToken);
+        };       
+        await _statusRepository.AddAsync(status, cancellationToken);
 
         // Broadcast to SSE clients
         var unreadCount = await GetUnreadCountAsync(request.TenantId, request.UserId, cancellationToken);
@@ -236,6 +211,27 @@ public class NotificationService : INotificationService
             IsDismissed = false
         };
         await _sseConnectionManager.BroadcastNotificationCreatedAsync(request.TenantId, request.UserId, notificationDto, cancellationToken);
+
+        // Send Web Push notification if service is available and user is subscribed
+        if (_webPushService != null)
+        {
+            try
+            {
+                await _webPushService.SendPushAsync(request.TenantId, request.UserId, notificationDto);
+                _logger.LogDebug("Web push notification sent for notification {NotificationId} (tenant: {TenantId}, user: {UserId})", 
+                    notification.Id, request.TenantId, request.UserId);
+            }
+            catch (Exception ex)
+            {
+                // Log but don't fail - Web Push is optional
+                _logger.LogWarning(ex, "Failed to send web push notification for notification {NotificationId} (tenant: {TenantId}, user: {UserId})", 
+                    notification.Id, request.TenantId, request.UserId);
+            }
+        }
+        else
+        {
+            _logger.LogDebug("Web push service not available - skipping push notification for notification {NotificationId}", notification.Id);
+        }
 
         return notification.Id;
     }

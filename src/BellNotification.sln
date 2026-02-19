@@ -12,6 +12,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "BellNotification.API", "API
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "BellNotification.Tests", "..\tests\BellNotification.Tests.csproj", "{344E3F3B-6A77-4010-944B-DB284C0927B7}"
 EndProject
+Project("{E53339B2-1760-4266-BCC7-CA923CBCF16C}") = "docker-compose", "..\docker-compose.dcproj", "{48F0753A-073A-4BFB-B5C7-F4FC3363E236}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -38,6 +40,10 @@ Global
 		{344E3F3B-6A77-4010-944B-DB284C0927B7}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{344E3F3B-6A77-4010-944B-DB284C0927B7}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{344E3F3B-6A77-4010-944B-DB284C0927B7}.Release|Any CPU.Build.0 = Release|Any CPU
+		{48F0753A-073A-4BFB-B5C7-F4FC3363E236}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{48F0753A-073A-4BFB-B5C7-F4FC3363E236}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{48F0753A-073A-4BFB-B5C7-F4FC3363E236}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{48F0753A-073A-4BFB-B5C7-F4FC3363E236}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

@@ -150,11 +150,12 @@ public sealed class KafkaBellNotificationConsumer : BackgroundService
                     using var scope = _scopeFactory.CreateScope();
                     var notificationService = scope.ServiceProvider.GetRequiredService<INotificationService>();
 
-                    await notificationService.CreateNotificationAsync(notificationRequest, stoppingToken);
+                    var notificationId = await notificationService.CreateNotificationAsync(notificationRequest, stoppingToken);
 
                     _consumer.Commit(result); // success
                     
-                    _logger.LogInformation("Bell notification created. Offset committed at {TPO}", result.TopicPartitionOffset);
+                    _logger.LogInformation("Bell notification created (ID: {NotificationId}) from Kafka topic {Topic}. SSE and Web Push notifications sent if applicable. Offset committed at {TPO}", 
+                        notificationId, result.Topic, result.TopicPartitionOffset);
                 }
                 catch (ConsumeException ex)
                 {

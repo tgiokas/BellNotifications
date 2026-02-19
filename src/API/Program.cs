@@ -1,13 +1,15 @@
+using System.Collections.Concurrent;
+using System.Text.Json;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.Tokens;
+
 using BellNotification.Application.Interfaces;
 using BellNotification.Application.Services;
+using BellNotification.Infrastructure;
 using BellNotification.Infrastructure.Database;
 using BellNotification.Infrastructure.Messaging;
 using BellNotification.Infrastructure.Services;
-using System.Text.Json;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -20,23 +22,18 @@ builder.Services.AddControllers()
         options.JsonSerializerOptions.WriteIndented = false;
     });
 
-// Database - Build connection string from environment variables
-var postgresHost = Environment.GetEnvironmentVariable("POSTGRES_HOST") ?? "localhost";
-var postgresPort = Environment.GetEnvironmentVariable("POSTGRES_PORT") ?? "5433";
-var postgresDb = Environment.GetEnvironmentVariable("POSTGRES_DB") ?? "bell_notifications_db";
-var postgresUser = Environment.GetEnvironmentVariable("POSTGRES_USER") ?? "postgres";
-var postgresPassword = Environment.GetEnvironmentVariable("POSTGRES_PASSWORD") ?? "postgres";
-
-var connectionString = $"Host={postgresHost};Port={postgresPort};Database={postgresDb};Username={postgresUser};Password={postgresPassword}";
-
-builder.Services.AddDbContext<ApplicationDbContext>(options =>
-    options.UseNpgsql(connectionString));
-
-builder.Services.AddScoped<IApplicationDbContext>(provider => provider.GetRequiredService<ApplicationDbContext>());
+// Register Database Context
+builder.Services.AddDatabaseServices(builder.Configuration, "postgresql");
 
 // Application services
 builder.Services.AddScoped<INotificationService, NotificationService>();
 builder.Services.AddSingleton<ISseConnectionManager, SseConnectionManager>();
+
+// Web Push - In-memory subscriptions store (POC)
+builder.Services.AddSingleton<ConcurrentDictionary<string, PushSubscriptionData>>();
+
+// Web Push Service
+builder.Services.AddSingleton<IWebPushService, WebPushService>();
 
 // Kafka consumer for bell notifications
 builder.Services.AddHostedService<KafkaBellNotificationConsumer>();
@@ -97,10 +94,16 @@ app.MapHealthChecks("/health");
 // Apply database migrations on startup (before middleware pipeline)
 using var scope = app.Services.CreateScope();
 var dbContext = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
-var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
-logger.LogInformation("Applying database migrations...");
 dbContext.Database.Migrate();
+var logger = app.Services.GetRequiredService<ILogger<Program>>();
 logger.LogInformation("Database migrations applied (if any).");
+
+// Important: disable response buffering for SSE
+app.Use(async (context, next) =>
+{
+    context.Response.Body = new System.IO.BufferedStream(context.Response.Body, 1);
+    await next();
+});
 
 app.UseHttpsRedirection();
 
